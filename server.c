@@ -1,0 +1,227 @@
+//server 
+#include <pthread.h>
+#include <stdio.h>
+#include <string.h>
+#include <errno.h>
+#include <sys/socket.h>
+#include <resolv.h>
+#include <stdlib.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <errno.h>
+#include <curses.h>
+#include <netdb.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+
+#define MSGLENGTH 1024
+#define PORT 1234
+#define CACERT "./private/ca.crt"
+#define SVRCERTF "./certs/server.crt"
+#define SVRKEYF "./private/server.key"
+
+void sendProc(void * arg);
+void recvProc(void * arg);
+
+void recvProc(void *arg)
+{
+		char recvBuffer[1024] = { 0 };
+		
+		SSL *ssl = (SSL *)arg;
+		
+        while (1)
+			{
+				memset(recvBuffer, 0 , sizeof(recvBuffer));
+				int ret = SSL_read (ssl, recvBuffer, sizeof (recvBuffer) );
+				if( ret > 0)
+				{
+					recvBuffer[ret] = '\0';
+					printf("\nMessage from this client : %s\n", recvBuffer);
+				}
+				else
+				{
+					perror(" The server has been disconnecting !\n");
+					break;
+				}
+				sleep(1);
+			}
+}
+
+
+//send messages
+void sendProc(void * arg)
+{
+		SSL *ssl = (SSL *)arg ;
+		
+		char sendBuffer[1024] = { 0 };
+		memset(sendBuffer, 0 , 1024);
+		
+		while(1)
+		{
+				printf("please input the message you want to send :");
+				fgets(sendBuffer, sizeof(sendBuffer), stdin);
+
+				if (strlen(sendBuffer) == sizeof(sendBuffer) - 1 && sendBuffer[sizeof(sendBuffer) - 2] != '\n')
+				{
+					scanf("%*[^\n]");
+					scanf("%*c");
+				}
+				sendBuffer[strlen(sendBuffer) - 1] = '\0';
+				if(!strcmp(sendBuffer,"quit") || !strcmp(sendBuffer,"q"))
+				{
+					printf("the communication is end ");
+					break;
+				}
+				if( SSL_write (ssl, (char *)&sendBuffer, strlen (sendBuffer)) == -1 )
+				{
+						printf("send failed \n");
+						break;
+				}
+				memset(sendBuffer, 0, sizeof(sendBuffer));
+				sleep(2);				
+		}
+}
+
+int main ()
+{
+	int sock;
+	SSL_METHOD *meth;
+	SSL_CTX *ctx;	
+		
+	pthread_t id1,id2;
+	
+	/* 初始化Openssl */
+	OpenSSL_add_ssl_algorithms ();
+	/* 载入所有 SSL 错误消息 */
+	SSL_load_error_strings ();
+	/* 创建本次会话所用协议 调用SSLv3 */
+	meth = (SSL_METHOD *) SSLv23_server_method ();
+	/* 创建SSL会话环境 */
+	ctx = SSL_CTX_new (meth);
+	if (NULL == ctx)
+	{
+		printf("session created failed!");
+		exit (1);
+	}
+	
+		
+	/* 设置证书验证 SSL_VERIFY_PEER 进行客户端服务器双向验证*/
+	SSL_CTX_set_verify (ctx, SSL_VERIFY_PEER, NULL);
+	/* 加载CA证书 */
+	SSL_CTX_load_verify_locations (ctx, CACERT, NULL);
+	/* 加载服务器证书 server.crt，里面含有服务器公钥，用来返回给客户端*/
+	if (0 == SSL_CTX_use_certificate_file (ctx, SVRCERTF, SSL_FILETYPE_PEM))
+	{		
+		ERR_print_errors_fp (stderr);
+		exit (1);
+	}
+	/* 加载服务器私钥 server.key */
+	if (0 == SSL_CTX_use_PrivateKey_file (ctx, SVRKEYF, SSL_FILETYPE_PEM))
+	{
+		ERR_print_errors_fp (stderr);
+		exit (1);
+	}
+	/* 检查服务器证书与私钥是否匹配 */
+		if (!SSL_CTX_check_private_key (ctx))
+		{
+				printf ("Private key does not match the certificate public key\n");
+				exit (1);
+		}
+		/* 选择加密方法 */
+		SSL_CTX_set_cipher_list (ctx, "RC4-MD5");
+		SSL_CTX_set_mode (ctx, SSL_MODE_AUTO_RETRY);
+		printf ("Begin tcp socket...\n");
+		sock = socket (AF_INET, SOCK_STREAM, 0);
+		if (sock == -1)
+		{
+				printf ("SOCKET error! \n");
+				return 0;
+		}
+		struct sockaddr_in addr;
+		memset (&addr, '\0', sizeof (addr));
+		addr.sin_family = AF_INET;
+		addr.sin_port = htons (PORT); /* Server Port number */
+		addr.sin_addr.s_addr = INADDR_ANY;
+		int nResult = bind (sock, (struct sockaddr *) &addr, sizeof (addr));
+		if (nResult == -1)
+		{
+				printf ("bind socket error\n");
+				return 0;
+		}
+		printf ("server start successfully,port:%d\nwaiting for connections\n",
+		PORT);
+		struct sockaddr_in sa_cli;
+		int err = listen (sock, 5);
+		if (-1 == err)
+				exit (1);
+		int client_len = sizeof (sa_cli);
+		
+		while(1)
+		{			
+			SSL *ssl;
+			int ss = accept (sock, (struct sockaddr *) &sa_cli, &client_len);
+			if (ss == -1)
+			{
+				exit (1);
+			}
+			ssl = SSL_new(ctx);
+			/* 绑定套接字  */
+			SSL_set_fd (ssl, ss);
+			/* SSL的握手 */
+			if (-1 == SSL_accept (ssl))
+			{
+				printf ("SSL connect fail!\n");
+	            return ;
+			}
+			X509 *client_cert;
+			/* 获得客户端证书 */
+			client_cert = SSL_get_peer_certificate (ssl);
+			printf ("find a customer to try to connect\n");
+			if (client_cert != NULL)
+			{
+				printf ("Client certificate:\n");
+				char *str = X509_NAME_oneline (X509_get_subject_name (client_cert), 0, 0);
+				if (NULL == str)
+				{
+					printf ("auth error!\n");
+					return ;
+				}
+				printf ("subject: %s\n", str);
+				str = X509_NAME_oneline (X509_get_issuer_name (client_cert), 0, 0);
+				if (NULL == str)
+				{
+					printf ("certificate name is null\n");
+					return ;
+				}
+				printf ("issuer: %s\n", str);
+				printf ("connect successfully\n");
+				X509_free (client_cert);
+		
+			    /* 接收客户端的消息 */
+			    pthread_create(&id1,NULL,(void *)recvProc,(void *)ssl);
+			    pthread_create(&id1,NULL,(void *)sendProc,(void *)ssl);
+			    pthread_join(id1,NULL);
+			    pthread_join(id2,NULL);
+				
+				OPENSSL_free (str);
+			}
+			else
+			{
+				printf ("can not find the customer's certificate\n");			
+			}
+			finish:
+		    /* 关闭 SSL 连接*/
+			SSL_shutdown(ssl);
+		    /* 释放 SSL */
+		    SSL_free(ssl);
+		    /* 关闭 socket */
+		    close(ss);
+		}		
+		
+		close (sock);
+		SSL_CTX_free (ctx);
+		return 0;
+}
